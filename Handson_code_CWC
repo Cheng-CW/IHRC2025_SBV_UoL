@@ -1,0 +1,117 @@
+setwd("~/Desktop/Data/")
+
+# Install Rsubread
+if (!require("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+
+BiocManager::install("Rsubread")
+
+# Load the Rsubread package
+library(Rsubread)
+
+# Define the directory containing your BAM files
+bam_directory <- "~/Desktop/Data/"
+
+# Get all BAM files in the directory
+bam_files <- list.files(path=bam_directory, pattern="\\.bam$", full.names=TRUE)
+
+# Define the path to your GTF file
+gtf_file <- "human_chr22.gtf"
+
+# Perform read counting
+counts <- featureCounts(files=bam_files, annot.ext=gtf_file, isGTFAnnotationFile=TRUE, GTF.featureType="exon", GTF.attrType="gene_id", isPairedEnd=TRUE)
+
+# View the counts
+head(counts$counts)
+
+# Remove the suffix from the column names
+colnames(counts$counts) <- gsub("_Aligned\\.sortedByCoord\\.out\\.bam$", "", colnames(counts$counts))
+
+# View the modified counts
+head(counts$counts)
+
+# Convert counts to a dataframe
+counts_df <- as.data.frame(counts$counts)
+
+# Save the counts to a CSV file
+write.csv(counts_df, "cleaned_counts.csv", row.names=TRUE)
+
+##### DESeq2
+
+metaData <- read.csv("metaData.csv", header=TRUE)
+metaData$condition <- factor(metaData$condition)
+sample_analysis_1_DE <- DESeqDataSetFromMatrix(countData=counts_df, colData=metaData, design=~condition)
+as.data.frame(colData(sample_analysis_1_DE))
+analysis_1 <- sample_analysis_1_DE[rowSums(DESeq2::counts(sample_analysis_1_DE)) > 10, ]
+analysis_1_dds <- DESeq(analysis_1)
+resultsNames(analysis_1_dds)
+colSums(assay(analysis_1_dds))
+colData(analysis_1_dds)
+normalised_analysis_1 <- counts(analysis_1_dds, normalized=TRUE) 
+head(normalised_analysis_1)
+analysis_1_DEG <-results(analysis_1_dds)
+analysis_1_DEGs <- analysis_1_DEG[order(analysis_1_DEG$padj),]
+analysis_1_result <- as.data.frame(dplyr::mutate(as.data.frame(analysis_1_DEGs ), sig=ifelse(analysis_1_DEGs$padj<0.05, "FDR<0.05", "Not Sig")), row.names=rownames(analysis_1_DEGs))
+sum(analysis_1_result$padj<0.05, na.rm = T)
+summary(analysis_1_result)
+
+# Enrichment analysis
+library(DOSE)
+library(pathview)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(AnnotationHub)
+library(ensembldb)
+library(ReactomePA)
+DEGs_analysis_1 <- subset(analysis_1_result, padj < 0.05)
+dim(DEGs_analysis_1)
+ensembl_analysis_1 <- rownames(DEGs_analysis_1)
+ensembl_analysis_1 <- sub("*\\..*", "", ensembl_analysis_1)
+ensembl_analysis_1
+id_analysis_1 <- bitr(ensembl_analysis_1, fromType="ENSEMBL", toType="ENTREZID", OrgDb="org.Hs.eg.db")
+Enrichment_DEGs_analysis_1 <- enrichGO(gene = as.vector(id_analysis_1$ENTREZID), 
+                                       keyType = "ENTREZID", OrgDb = org.Hs.eg.db, ont = "ALL", 
+                                       pvalueCutoff=0.05, qvalueCutoff=0.05, minGSSize=2, readable = TRUE)
+cluster_summary_analysis_1 <- data.frame(Enrichment_DEGs_analysis_1)
+dim(cluster_summary_analysis_1)
+ego_analysis_1 <- setReadable(Enrichment_DEGs_analysis_1, OrgDb = org.Hs.eg.db)
+head(ego_analysis_1)
+dotplot(ego_analysis_1, showCategory=30)
+
+# KEGG
+kegg_organism <- "hsa"
+kegg_analysis_1 <- bitr(ensembl_analysis_1, fromType = "ENSEMBL", toType = c("ENTREZID", "SYMBOL"), OrgDb = org.Hs.eg.db)
+kegg_analysis_1 <- kegg_analysis_1[!duplicated(kegg_analysis_1[c("ENSEMBL")]),]
+DEGs_analysis_1$ensembl <- rownames(DEGs_analysis_1)
+DEGs_analysis_1$ensembl <- sub("*\\..*", "", DEGs_analysis_1$ensembl)
+row.names(DEGs_analysis_1) <- DEGs_analysis_1$ensembl
+DEGs_analysis_1$ensembl <- NULL
+kegg_analysis_1_a <- DEGs_analysis_1[rownames(DEGs_analysis_1) %in% kegg_analysis_1$ENSEMBL,]
+kegg_analysis_1_a$Y <- kegg_analysis_1$ENTREZID
+FC_analysis_1 <- kegg_analysis_1_a$log2FoldChange
+names(FC_analysis_1) <- kegg_analysis_1_a$Y
+kegg_gene_list_analysis_1 <- sort(FC_analysis_1, decreasing = TRUE)
+kegg_analysis_1 <- gseKEGG(geneList = kegg_gene_list_analysis_1,
+                           organism     = kegg_organism,
+                           nPerm        = 1000,
+                           minGSSize    = 2,
+                           maxGSSize    = 800,
+                           pvalueCutoff = 0.10,
+                           pAdjustMethod = "none",
+                           keyType       = "ncbi-geneid")
+gseaKEGG_results_analysis_1 <- kegg_analysis_1@result
+head(gseaKEGG_results_analysis_1)
+kegg_readable_analysis_1 <- setReadable(kegg_analysis_1, OrgDb = org.Hs.eg.db, keyType="ENTREZID")
+kegg_cluster_summary_analysis_1 <- data.frame(kegg_readable_analysis_1)
+dotplot(kegg_readable_analysis_1, title = "Enriched Pathways" , split=".sign") + facet_grid(.~.sign)
+
+# Volcano plot 
+volcano_plot_1 <- analysis_1_merge_3[ which(analysis_1_merge_3$padj < 0.05),]
+rownames(volcano_plot_1) = volcano_plot_1$gene_symbol
+p <- ggplot(analysis_1_merge_3, aes(log2FoldChange, -log10(pvalue))) +
+  geom_point(aes(col = sig)) + 
+  scale_color_manual(values = c("red", "black")) + 
+  geom_vline(xintercept=c(-0,0), linetype="dotted") + 
+  xlim(-2, 2) +
+  theme(legend.position = "none", text = element_text(size=20))
+p + geom_text_repel(data=volcano_plot_1[1:50, ], aes(label=rownames(volcano_plot_1[1:50, ])))
